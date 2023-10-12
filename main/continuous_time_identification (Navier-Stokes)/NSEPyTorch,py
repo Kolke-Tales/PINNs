@@ -1,0 +1,155 @@
+"""
+@author: Sayan Chowdhury
+"""
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+import sys
+sys.path.insert(0, 'E:/RESEARCH_SHIP_RESISTANCE_AI_ML/codes/NSE/PINNs/Utilities')
+import numpy as np
+import matplotlib.pyplot as plt
+import scipy.io
+from scipy.interpolate import griddata
+import time
+from itertools import product, combinations
+from mpl_toolkits.mplot3d import Axes3D
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from plotting import newfig, savefig
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+import matplotlib.gridspec as gridspec
+from tqdm import tqdm
+
+torch.manual_seed(1234)
+np.random.seed(1234)
+
+# GPU
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Define the RANS equations
+def nse(u, v, p, x, y, Re):
+    # Define the constants
+    rho = 1.0
+    mu = rho / Re
+    
+    # Compute the gradients
+    u_x = torch.autograd.grad(u, x, create_graph=True)[0]
+    u_y = torch.autograd.grad(u, y, create_graph=True)[0]
+    v_x = torch.autograd.grad(v, x, create_graph=True)[0]
+    v_y = torch.autograd.grad(v, y, create_graph=True)[0]
+    
+    # Compute the residuals
+    f_u = rho * u_x + rho * v_y - torch.autograd.grad(p, x, create_graph=True)[0] + mu * (u_xx + u_yy) - rho * u_t
+    f_v = rho * u_x + rho * v_y - torch.autograd.grad(p, y, create_graph=True)[0] + mu * (v_xx + v_yy) - rho * v_t
+    f_p = u_x + v_y
+    
+    return f_u, f_v, f_p
+
+# Define the neural network
+class PINN(nn.Module):
+    def __init__(self, layers):
+        super(PINN, self).__init__()
+        
+        self.fc1 = nn.Linear(2, layers[0])
+        self.fc2 = nn.Linear(layers[0], layers[1])
+        self.fc3 = nn.Linear(layers[1], layers[2])
+        self.fc4 = nn.Linear(layers[2], 3)
+        
+        self.relu = nn.ReLU()
+        
+    def forward(self, x, y):
+        uvp = torch.cat([x, y], 1)
+        
+        a1 = self.relu(self.fc1(uvp))
+        a2 = self.relu(self.fc2(a1))
+        a3 = self.relu(self.fc3(a2))
+        a4 = self.fc4(a3)
+        
+        u = a4[:, 0:1]
+        v = a4[:, 1:2]
+        p = a4[:, 2:3]
+        
+        return u, v, p
+
+# Define the domain and boundary conditions
+x = torch.linspace(0, 1, 100)
+y = torch.linspace(0, 1, 100)
+X, Y = torch.meshgrid(x, y)
+
+u = torch.zeros_like(X)
+v = torch.zeros_like(Y)
+p = torch.zeros_like(X)
+
+u[:, 0] = 1.0
+u[:, -1] = 0.0
+v[0, :] = 0.0
+v[-1, :] = 0.0
+
+# Define the initial conditions
+u0 = torch.sin(np.pi * X)
+v0 = torch.zeros_like(Y)
+p0 = torch.zeros_like(X)
+
+# Define the time steps
+t = torch.linspace(0, 1, 100)
+
+# Define the Reynolds number
+Re = 100.0
+
+# Define the neural network
+layers = [2, 10, 10, 3]
+model = PINN(layers)
+
+# Define the optimizer
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+# Train the neural network
+for i in tqdm(range(1000)):
+    # Compute the predictions
+    u_pred, v_pred, p_pred = model(X, Y)
+    
+    # Compute the residuals
+    f_u, f_v, f_p = nse(u_pred, v_pred, p_pred, X, Y, Re)
+    
+    # Compute the loss
+    loss = torch.mean(f_u**2) + torch.mean(f_v**2) + torch.mean(f_p**2)
+    
+    # Zero the gradients
+    optimizer.zero_grad()
+    
+    # Compute the gradients
+    loss.backward()
+    
+    # Update the weights
+    optimizer.step()
+    
+    # Print the loss
+    if i % 100 == 0:
+        print('Loss:', loss.item())
+        
+# Plot the results
+fig = plt.figure(figsize=(12, 4))
+
+plt.subplot(1, 3, 1)
+plt.contourf(X, Y, u_pred.detach().numpy())
+plt.colorbar()
+plt.xlabel('x')
+plt.ylabel('y')
+plt.title('u')
+
+plt.subplot(1, 3, 2)
+plt.contourf(X, Y, v_pred.detach().numpy())
+plt.colorbar()
+plt.xlabel('x')
+plt.ylabel('y')
+plt.title('v')
+
+plt.subplot(1, 3, 3)
+plt.contourf(X, Y, p_pred.detach().numpy())
+plt.colorbar()
+plt.xlabel('x')
+plt.ylabel('y')
+plt.title('p')
+
+plt.tight_layout()
+plt.show()
